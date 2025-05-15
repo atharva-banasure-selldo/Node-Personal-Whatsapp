@@ -1,9 +1,11 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const { Database } = require("pg");
+
 const Message = require("./models/Message");
 const { createClient } = require("./helpers/create-client-helper");
-const { Database } = require("pg");
+
 require("dotenv").config();
 
 // const db = new Database({
@@ -58,35 +60,33 @@ app.post("/connect", async (req, res) => {
 // Get recent messages of a user
 app.get("/messages/:userId", async (req, res) => {
   const { userId } = req.params;
-  console.log("userId:", userId);
+  const {telephoneNumber} = req.query;
+  if (!userId) {
+    return res.status(400).json({ error: "userId is required" });
+  }
+
+  const { client, qr, isAuthenticated } = clients.get(userId);
+  console.log("Messages for userId:", userId);
   try {
-    const messages = await Message.find({
-      userId,
-    })
-      .sort({ createdAt: -1 })
-      .limit(40);
-    console.log("message count:", messages.length);
-    res.json(messages);
+    const allMessages = await client.sendSeen(telephoneNumber);
+    console.log("allMessages:", allMessages);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
 
-app.post("/messages/send/:userId", async (req, res) => {
-  const { userId, number, message, sender } = req.body;
+app.post("/messages/send", async (req, res) => {
+  const { userId, number, message, sender, mark_as_read } = req.body;
 
   if (!userId || !number || !message || !sender) {
     return res
       .status(400)
       .json({ error: "userID, number, message, and sender are required" });
   }
-  console.log("userId:", userId);
-  console.log("number:", number);
-  console.log("message:", message);
-  console.log("sender:", sender);
-  console.log("Clients:", clients);
-  const state = clients.get(1);
-  console.log("State:", state);
+
+  const state = clients.get(userId);
+  console.log("state:", state.isAuthenticated);
+
   if (!state || !state.isAuthenticated) {
     return res
       .status(400)
