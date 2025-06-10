@@ -2,19 +2,14 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { Database } = require("pg");
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
 
 const Message = require("./models/Message");
 const { createClient } = require("./helpers/create-client-helper");
+const { Client } = require("whatsapp-web.js");
 
 require("dotenv").config();
-
-// const db = new Database({
-// 	user: 'atharva',
-// 	password: 'atharva',
-// 	host: 'localhost',
-// 	port: '4000',
-// 	database: 'crm',
-// });
 
 mongoose
   .connect(process.env.MONGO_URI, {
@@ -30,6 +25,20 @@ app.use(express.json());
 
 // TODO: have the permanent storage of authenticated clients
 const clients = new Map();
+
+// Restore clients from Postgres
+async function restoreSessions() {
+  const sessions = await prisma.whatsAppClient.findMany({
+    where: { isAuthenticated: true },
+  });
+
+  for (const session of sessions) {
+    console.log(`Restoring session for ${session.userId}`);
+    createClient(session.userId, clients);
+  }
+}
+
+restoreSessions();
 
 // === API ROUTES ===
 app.post("/connect", async (req, res) => {
@@ -60,16 +69,15 @@ app.post("/connect", async (req, res) => {
 // Get recent messages of a user
 app.get("/messages/:userId", async (req, res) => {
   const { userId } = req.params;
-  const {telephoneNumber} = req.query;
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
   }
-
   const { client, qr, isAuthenticated } = clients.get(userId);
   console.log("Messages for userId:", userId);
   try {
-    const allMessages = await client.sendSeen(telephoneNumber);
-    console.log("allMessages:", allMessages);
+    const messages = await Message.find({userId}).sort({ createdAt: -1 }).limit(40);
+    console.log("message count:",messages.length);
+    res.json(messages);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch messages" });
   }

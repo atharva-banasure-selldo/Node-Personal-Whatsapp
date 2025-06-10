@@ -5,6 +5,8 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
 
 function createClient(userId, clients) {
   return new Promise((resolve, reject) => {
@@ -40,16 +42,33 @@ function createClient(userId, clients) {
             status: "success",
           }
         );
+      }catch(err){
+        console.log("Error while sending notification", err.message);
+      }
 
+      try {
         clients.set(userId, {
           ...state,
           isAuthenticated: true,
           qr: null,
         });
+
+        //Store or update in Postgres using Prisma
+        let res = await prisma.whatsAppClient.upsert({
+          where: { userId },
+          update: {
+            isAuthenticated: true,
+          },
+          create: {
+            userId,
+            isAuthenticated: true,
+          },
+        });
       } catch (error) {
         console.log("Error during authentication:", error.message);
       }
     });
+
     client.on("loading_screen", async () => {
       console.log(`Loading screen for ${userId}`);
       try {
@@ -74,6 +93,12 @@ function createClient(userId, clients) {
       });
       state.isAuthenticated = false;
       state.qr = null;
+
+      // Update DB on failure
+      await prisma.whatsAppClient.updateMany({
+        where: { userId },
+        data: { isAuthenticated: false },
+      });
     });
 
     client.on("message_create", async (message) => {
@@ -111,8 +136,13 @@ function createClient(userId, clients) {
         if (fs.existsSync(authDir)) {
           fs.rmSync(authDir, { recursive: true, force: true });
         }
-
         clients.delete(userId);
+
+        //Update DB on disconnect
+        await prisma.whatsAppClient.updateMany({
+          where: { userId },
+          data: { isAuthenticated: false },
+        });
       } catch (error) {
         console.error(
           "Error cleaning up auth directory or destroying the client session:",
