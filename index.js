@@ -1,9 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const { Database } = require("pg");
-const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
+const WhatsAppClient = require("./models/WhatsAppClient");
 
 const Message = require("./models/Message");
 const { createClient } = require("./helpers/create-client-helper");
@@ -23,18 +21,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// TODO: have the permanent storage of authenticated clients
+// In-memory storage for active WhatsApp clients
 const clients = new Map();
 
-// Restore clients from Postgres
+// Restore clients from MongoDB
 async function restoreSessions() {
-  const sessions = await prisma.whatsAppClient.findMany({
-    where: { isAuthenticated: true },
-  });
+  try{
+    const sessions = await WhatsAppClient.find({isAuthenticated: true});
 
-  for (const session of sessions) {
-    console.log(`Restoring session for ${session.userId}`);
-    createClient(session.userId, clients);
+    if (sessions.length === 0) {
+      console.log("No authenticated sessions found to restore.");
+      return;
+    }else{
+      for(const session of sessions){
+        console.log(`Restoring session for ${session.userId}`);
+        try{
+          await createClient(session.userId);
+        }catch(error){
+          console.error(`Failed to restore session for ${session.userId}:`, error.message);
+          
+          // Update the session as not authenticated if restoration fails
+          await WhatsAppClient.findOneAndUpdate(
+            { userId: session.userId },
+            { 
+              isAuthenticated: false,
+              updatedAt: new Date()
+            }
+          );
+        }
+      }
+    }
+  } catch(error){
+    console.error("Error restoring sessions:", error.message);
   }
 }
 
@@ -46,7 +64,7 @@ app.post("/connect", async (req, res) => {
 
   if (!userId) return res.status(400).json({ error: "userId is required" });
 
-  let state = clients.get(userId);
+  let state = await WhatsAppClient.findOne({ userId });
 
   if (state) {
     if (state.isAuthenticated) {
@@ -58,7 +76,7 @@ app.post("/connect", async (req, res) => {
   }
   // Create new client & get QR directly
   try {
-    const qr = await createClient(userId, clients);
+    const qr = await createClient(userId);
     return res.json({ status: "pending", qr });
   } catch (err) {
     console.error(err);
@@ -72,7 +90,7 @@ app.get("/messages/:userId", async (req, res) => {
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
   }
-  const { client, qr, isAuthenticated } = clients.get(userId);
+  const { client, qr, isAuthenticated } = await WhatsAppClient.findOne({ userId });
   console.log("Messages for userId:", userId);
   try {
     const messages = await Message.find({userId}).sort({ createdAt: -1 }).limit(40);
@@ -84,7 +102,7 @@ app.get("/messages/:userId", async (req, res) => {
 });
 
 app.post("/messages/send", async (req, res) => {
-  const { userId, number, message, sender, mark_as_read } = req.body;
+  const { userId, number, message, sender } = req.body;
 
   if (!userId || !number || !message || !sender) {
     return res
@@ -92,7 +110,7 @@ app.post("/messages/send", async (req, res) => {
       .json({ error: "userID, number, message, and sender are required" });
   }
 
-  const state = clients.get(userId);
+  const state = await WhatsAppClient.findOne({ userId });
   console.log("state:", state.isAuthenticated);
 
   if (!state || !state.isAuthenticated) {
