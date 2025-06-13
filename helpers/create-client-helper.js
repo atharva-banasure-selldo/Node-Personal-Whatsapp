@@ -1,13 +1,14 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const QRCode = require("qrcode");
-const Message = require("../models/Message");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
+const { Client, LocalAuth } = require("whatsapp-web.js");
+
+const Message = require("../models/Message");
 const WhatsAppClient = require("../models/WhatsAppClient");
 
-async function createClient(userId) {
+exports.createClient = async function (userId) {
   return new Promise(async (resolve, reject) => {
     const client = new Client({
       authStrategy: new LocalAuth({ clientId: userId }),
@@ -18,17 +19,16 @@ async function createClient(userId) {
     });
 
     const state = { client, qr: null, isAuthenticated: false };
-    console.log(`Creating client for user: ${userId}`);
-    await WhatsAppClient.insertOne({ userId }, state);
-    console.log(`Client created for user: ${userId}`);
+
+    if (!WhatsAppClient.findOne({ userId })) {
+      await WhatsAppClient.insertOne({ userId }, state);
+    }
 
     client.on("qr", async (qr) => {
-      console.log(`QR for ${userId}`);
-      qrcode.generate(qr, { small: true });
+      qrcode.generate(qr, { small: true }); // TODO: Will remove this line later (Used for getting QR code in terminal)
       try {
         state.qr = await QRCode.toDataURL(qr);
         await WhatsAppClient.findOneAndUpdate({ userId }, { qr: state.qr });
-        console.log(`QR Code updated in MongoDB for user: ${userId}`);
         resolve(state.qr);
       } catch (err) {
         reject("QR Code generation failed");
@@ -45,7 +45,7 @@ async function createClient(userId) {
             status: "success",
           }
         );
-      }catch(err){
+      } catch (err) {
         console.log("Error while sending notification", err.message);
       }
 
@@ -56,12 +56,12 @@ async function createClient(userId) {
           {
             isAuthenticated: true,
             qr: null, // Clear QR code after authentication
-            updatedAt: new Date()
+            updatedAt: new Date(),
           },
           {
-            new: true     // Return updated document
+            new: true, // Return updated document
           }
-        )
+        );
       } catch (error) {
         console.log("Error during authentication:", error.message);
       }
@@ -84,29 +84,32 @@ async function createClient(userId) {
 
     client.on("auth_failure", async (message) => {
       console.log(`Authentication failure for ${userId}: ${message}`);
-      try {   
-        axios.post("http://localhost:8888/client/personal-whatsapps/notify.json", {
-          userId,
-          status: "failed",
-          message: "Failed to authenticate, Please try again",
-        });
+      try {
+        axios.post(
+          "http://localhost:8888/client/personal-whatsapps/notify.json",
+          {
+            userId,
+            status: "failed",
+            message: "Failed to authenticate, Please try again",
+          }
+        );
       } catch (error) {
         console.error("Error during auth failure notification:", error.message);
       }
-      
+
       state.isAuthenticated = false;
       state.qr = null;
 
       // Update DB on failure
-      try{
+      try {
         await WhatsAppClient.findOneAndUpdate(
-          {userId},
+          { userId },
           {
             isAuthenticated: false,
-            updatedAt: new Date()
+            updatedAt: new Date(),
           }
         );
-      }catch(error){
+      } catch (error) {
         console.log("Error updating mongoDB on auth failure", error.message);
       }
     });
@@ -132,15 +135,18 @@ async function createClient(userId) {
 
     client.on("disconnected", async (reason) => {
       console.log(`Client: ${userId} disconnected`, reason);
-      // try {   
-      //   axios.post("http://localhost:8888/client/personal-whatsapps/notify.json", {
-      //     userId,
-      //     status: "disconnect",
-      //     message: "Disconnected"
-      //   });
-      // } catch (error) {
-      //   console.error("Error during auth failure notification:", error.message);
-      // }
+      try {
+        axios.post(
+          "http://localhost:8888/client/personal-whatsapps/notify.json",
+          {
+            userId,
+            status: "disconnect",
+            message: "Disconnected",
+          }
+        );
+      } catch (error) {
+        console.error("Error during auth failure notification:", error.message);
+      }
 
       try {
         await client.destroy();
@@ -153,14 +159,16 @@ async function createClient(userId) {
 
         //Update DB on disconnect
         await WhatsAppClient.findOneAndUpdate(
-          {userId},
+          { userId },
           {
             isAuthenticated: false,
-            updatedAt: new Date()
+            updatedAt: new Date(),
           }
         );
 
-        console.log(`Whasapp Client state updated in mongoDb for disconnect user: ${userId}`);
+        console.log(
+          `Whasapp Client state updated in mongoDb for disconnect user: ${userId}`
+        );
       } catch (error) {
         console.error(
           "Error cleaning up auth directory or destroying the client session:",
@@ -171,8 +179,28 @@ async function createClient(userId) {
 
     client.initialize();
   });
-}
+};
 
-module.exports = {
-  createClient,
+exports.restoreSessions = async function () {
+  try {
+    const sessions = await WhatsAppClient.find({ isAuthenticated: true });
+
+    for (const session of sessions) {
+      try {
+        console.log(`Restoring session for ${session.userId}`);
+        await createClient(session.userId);
+      } catch (error) {
+        console.error(
+          `Failed to restore session for ${session.userId}:`,
+          error.message
+        );
+        await WhatsAppClient.findOneAndUpdate(
+          { userId: session.userId },
+          { isAuthenticated: false, updatedAt: new Date() }
+        );
+      }
+    }
+  } catch (error) {
+    console.error("Error restoring sessions:", error.message);
+  }
 };
