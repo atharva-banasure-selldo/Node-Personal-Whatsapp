@@ -1,15 +1,15 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const QRCode = require("qrcode");
-const Message = require("../models/Message");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
-const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
+const QRCode = require("qrcode");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 
-function createClient(userId, clients) {
-  return new Promise((resolve, reject) => {
+const Message = require("../models/Message");
+const WhatsAppClient = require("../models/WhatsAppClient");
+
+exports.createClient = async function (userId) {
+  return new Promise(async (resolve, reject) => {
     const client = new Client({
       authStrategy: new LocalAuth({ clientId: userId }),
       puppeteer: {
@@ -19,13 +19,16 @@ function createClient(userId, clients) {
     });
 
     const state = { client, qr: null, isAuthenticated: false };
-    clients.set(userId, state);
+
+    if (!WhatsAppClient.findOne({ userId })) {
+      await WhatsAppClient.insertOne({ userId }, state);
+    }
 
     client.on("qr", async (qr) => {
-      console.log(`QR for ${userId}`);
-      qrcode.generate(qr, { small: true });
+      qrcode.generate(qr, { small: true }); // TODO: Will remove this line later (Used for getting QR code in terminal)
       try {
         state.qr = await QRCode.toDataURL(qr);
+        await WhatsAppClient.findOneAndUpdate({ userId }, { qr: state.qr });
         resolve(state.qr);
       } catch (err) {
         reject("QR Code generation failed");
@@ -42,28 +45,23 @@ function createClient(userId, clients) {
             status: "success",
           }
         );
-      }catch(err){
+      } catch (err) {
         console.log("Error while sending notification", err.message);
       }
 
       try {
-        clients.set(userId, {
-          ...state,
-          isAuthenticated: true,
-          qr: null,
-        });
-
-        //Store or update in Postgres using Prisma
-        let res = await prisma.whatsAppClient.upsert({
-          where: { userId },
-          update: {
+        //Store or update in MongoDB using Mongoose
+        await WhatsAppClient.findOneAndUpdate(
+          { userId },
+          {
             isAuthenticated: true,
+            qr: null, // Clear QR code after authentication
+            updatedAt: new Date(),
           },
-          create: {
-            userId,
-            isAuthenticated: true,
-          },
-        });
+          {
+            new: true, // Return updated document
+          }
+        );
       } catch (error) {
         console.log("Error during authentication:", error.message);
       }
@@ -86,19 +84,34 @@ function createClient(userId, clients) {
 
     client.on("auth_failure", async (message) => {
       console.log(`Authentication failure for ${userId}: ${message}`);
-      axios.post("http://localhost:8888/client/personal-whatsapps/notify.json", {
-        userId,
-        status: "failed",
-        message: "Failed to authenticate, Please try again",
-      });
+      try {
+        axios.post(
+          "http://localhost:8888/client/personal-whatsapps/notify.json",
+          {
+            userId,
+            status: "failed",
+            message: "Failed to authenticate, Please try again",
+          }
+        );
+      } catch (error) {
+        console.error("Error during auth failure notification:", error.message);
+      }
+
       state.isAuthenticated = false;
       state.qr = null;
 
       // Update DB on failure
-      await prisma.whatsAppClient.updateMany({
-        where: { userId },
-        data: { isAuthenticated: false },
-      });
+      try {
+        await WhatsAppClient.findOneAndUpdate(
+          { userId },
+          {
+            isAuthenticated: false,
+            updatedAt: new Date(),
+          }
+        );
+      } catch (error) {
+        console.log("Error updating mongoDB on auth failure", error.message);
+      }
     });
 
     client.on("message_create", async (message) => {
@@ -122,27 +135,40 @@ function createClient(userId, clients) {
 
     client.on("disconnected", async (reason) => {
       console.log(`Client: ${userId} disconnected`, reason);
-
-      axios.post("http://localhost:8888/client/personal-whatsapps/notify.json", {
-        userId,
-        status: "disconnect",
-        message: "Client disconnected",
-      });
+      try {
+        axios.post(
+          "http://localhost:8888/client/personal-whatsapps/notify.json",
+          {
+            userId,
+            status: "disconnect",
+            message: "Disconnected",
+          }
+        );
+      } catch (error) {
+        console.error("Error during auth failure notification:", error.message);
+      }
 
       try {
         await client.destroy();
-
+        console.log(`Client destroying for user: ${userId}`);
         const authDir = path.join(".wwebjs_auth", `session-${userId}`);
         if (fs.existsSync(authDir)) {
           fs.rmSync(authDir, { recursive: true, force: true });
         }
-        clients.delete(userId);
+        WhatsAppClient.deleteOne({ userId });
 
         //Update DB on disconnect
-        await prisma.whatsAppClient.updateMany({
-          where: { userId },
-          data: { isAuthenticated: false },
-        });
+        await WhatsAppClient.findOneAndUpdate(
+          { userId },
+          {
+            isAuthenticated: false,
+            updatedAt: new Date(),
+          }
+        );
+
+        console.log(
+          `Whasapp Client state updated in mongoDb for disconnect user: ${userId}`
+        );
       } catch (error) {
         console.error(
           "Error cleaning up auth directory or destroying the client session:",
@@ -153,8 +179,28 @@ function createClient(userId, clients) {
 
     client.initialize();
   });
-}
+};
 
-module.exports = {
-  createClient,
+exports.restoreSessions = async function () {
+  try {
+    const sessions = await WhatsAppClient.find({ isAuthenticated: true });
+
+    for (const session of sessions) {
+      try {
+        console.log(`Restoring session for ${session.userId}`);
+        await createClient(session.userId);
+      } catch (error) {
+        console.error(
+          `Failed to restore session for ${session.userId}:`,
+          error.message
+        );
+        await WhatsAppClient.findOneAndUpdate(
+          { userId: session.userId },
+          { isAuthenticated: false, updatedAt: new Date() }
+        );
+      }
+    }
+  } catch (error) {
+    console.error("Error restoring sessions:", error.message);
+  }
 };
