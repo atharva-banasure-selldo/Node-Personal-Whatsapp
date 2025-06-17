@@ -19,10 +19,15 @@ exports.createClient = async function (userId) {
     });
 
     const state = { client, qr: null, isAuthenticated: false };
-
-    if (!WhatsAppClient.findOne({ userId })) {
+    console.log(
+      `Creating client for userId: ${userId}`,
+      !(await WhatsAppClient.findOne({ userId }))
+    );
+    if (!(await WhatsAppClient.findOne({ userId }))) {
+      console.log(`Inserting new client for userId: ${userId}`);
       await WhatsAppClient.insertOne({ userId }, state);
     }
+    console.log(`Client created for userId: ${userId}`);
 
     client.on("qr", async (qr) => {
       qrcode.generate(qr, { small: true }); // TODO: Will remove this line later (Used for getting QR code in terminal)
