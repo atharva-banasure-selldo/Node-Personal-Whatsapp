@@ -3,31 +3,64 @@ const fs = require("fs");
 const path = require("path");
 const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
-const { Client, LocalAuth } = require("whatsapp-web.js");
-
+const { Client, RemoteAuth } = require("whatsapp-web.js");
 const Message = require("../models/Message");
 const WhatsAppClient = require("../models/WhatsAppClient");
+const { MongoStore } = require('wwebjs-mongo');
+const mongoose = require("mongoose");
 
-exports.createClient = async function (userId) {
+const clients = new Map();
+
+const cleanupSession = async (userId) => {
+  try {
+    console.log(`Cleaning up session for ${userId}`);
+    const authDir = path.join(".wwebjs_auth", `session-${userId}`);
+    if (fs.existsSync(authDir)) {
+      fs.rmSync(authDir, { recursive: true, force: true });
+    }
+    await WhatsAppClient.findOneAndUpdate(
+      { userId },
+      {
+        isAuthenticated: false,
+        qr: null,
+        updatedAt: new Date()
+      }
+    );
+    if(clients.has(userId)){
+      clients.delete(userId);
+    }
+  } catch (error) {
+    console.error(`Error cleaning session for ${userId}:`, error.message);
+  }
+};
+
+const createClient = async function (userId) {
   return new Promise(async (resolve, reject) => {
+    const store = new MongoStore({ mongoose: mongoose });
     const client = new Client({
-      authStrategy: new LocalAuth({ clientId: userId }),
+      authStrategy: new RemoteAuth({ 
+        clientId: userId,
+        store: store,
+        backupSyncIntervalMs: 300000 
+      }),
       puppeteer: {
         headless: true,
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       },
     });
-
+    clients.set(userId, client);
+    
     const state = { client, qr: null, isAuthenticated: false };
-    console.log(
-      `Creating client for userId: ${userId}`,
-      !(await WhatsAppClient.findOne({ userId }))
-    );
+
     if (!(await WhatsAppClient.findOne({ userId }))) {
       console.log(`Inserting new client for userId: ${userId}`);
       await WhatsAppClient.insertOne({ userId }, state);
+      console.log(`Client created for userId: ${userId}`);
     }
-    console.log(`Client created for userId: ${userId}`);
+
+    client.on("remote_session_saved", () => {
+      console.log(`Remote session saved for userId: ${userId}`);
+    });
 
     client.on("qr", async (qr) => {
       qrcode.generate(qr, { small: true }); // TODO: Will remove this line later (Used for getting QR code in terminal)
@@ -43,13 +76,13 @@ exports.createClient = async function (userId) {
     client.on("authenticated", async () => {
       console.log(`Authenticated: ${userId}`);
       try {
-        await axios.post(
-          "http://localhost:8888/client/personal-whatsapps/notify.json",
-          {
-            userId,
-            status: "success",
-          }
-        );
+        // await axios.post(
+        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
+        //   {
+        //     userId,
+        //     status: "success",
+        //   }
+        // );
       } catch (err) {
         console.log("Error while sending notification", err.message);
       }
@@ -75,13 +108,13 @@ exports.createClient = async function (userId) {
     client.on("loading_screen", async () => {
       console.log(`Loading screen for ${userId}`);
       try {
-        await axios.post(
-          "http://localhost:8888/client/personal-whatsapps/notify.json",
-          {
-            userId,
-            status: "loading",
-          }
-        );
+        // await axios.post(
+        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
+        //   {
+        //     userId,
+        //     status: "loading",
+        //   }
+        // );
       } catch (error) {
         console.log("Error during loading screen:", error.message);
       }
@@ -90,33 +123,42 @@ exports.createClient = async function (userId) {
     client.on("auth_failure", async (message) => {
       console.log(`Authentication failure for ${userId}: ${message}`);
       try {
-        axios.post(
-          "http://localhost:8888/client/personal-whatsapps/notify.json",
-          {
-            userId,
-            status: "failed",
-            message: "Failed to authenticate, Please try again",
-          }
-        );
+        // axios.post(
+        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
+        //   {
+        //     userId,
+        //     status: "failed",
+        //     message: "Failed to authenticate, Please try again",
+        //   }
+        // );
       } catch (error) {
         console.error("Error during auth failure notification:", error.message);
       }
+      await cleanupSession(userId);
+    });
 
-      state.isAuthenticated = false;
-      state.qr = null;
+    client.on("remote_session_removed", async () => {
+      console.log(`Remote session removed for ${userId}`);
+      await cleanupSession(userId);
+    });
 
-      // Update DB on failure
+    client.on("disconnected", async (reason) => {
+      console.log(`Client: ${userId} disconnected`, reason);
       try {
-        await WhatsAppClient.findOneAndUpdate(
-          { userId },
-          {
-            isAuthenticated: false,
-            updatedAt: new Date(),
-          }
-        );
+        // axios.post(
+        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
+        //   {
+        //     userId,
+        //     status: "disconnect",
+        //     message: "Disconnected",
+        //   }
+        // );
       } catch (error) {
-        console.log("Error updating mongoDB on auth failure", error.message);
+        console.error("Error during auth failure notification:", error.message);
       }
+      setTimeout(async () => {
+        await cleanupSession(userId);
+      }, 2000);
     });
 
     client.on("message_create", async (message) => {
@@ -138,55 +180,11 @@ exports.createClient = async function (userId) {
       }
     });
 
-    client.on("disconnected", async (reason) => {
-      console.log(`Client: ${userId} disconnected`, reason);
-      try {
-        axios.post(
-          "http://localhost:8888/client/personal-whatsapps/notify.json",
-          {
-            userId,
-            status: "disconnect",
-            message: "Disconnected",
-          }
-        );
-      } catch (error) {
-        console.error("Error during auth failure notification:", error.message);
-      }
-
-      try {
-        await client.destroy();
-        console.log(`Client destroying for user: ${userId}`);
-        const authDir = path.join(".wwebjs_auth", `session-${userId}`);
-        if (fs.existsSync(authDir)) {
-          fs.rmSync(authDir, { recursive: true, force: true });
-        }
-        WhatsAppClient.deleteOne({ userId });
-
-        //Update DB on disconnect
-        await WhatsAppClient.findOneAndUpdate(
-          { userId },
-          {
-            isAuthenticated: false,
-            updatedAt: new Date(),
-          }
-        );
-
-        console.log(
-          `Whasapp Client state updated in mongoDb for disconnect user: ${userId}`
-        );
-      } catch (error) {
-        console.error(
-          "Error cleaning up auth directory or destroying the client session:",
-          error.message
-        );
-      }
-    });
-
     client.initialize();
   });
 };
 
-exports.restoreSessions = async function () {
+const restoreSessions = async function () {
   try {
     const sessions = await WhatsAppClient.find({ isAuthenticated: true });
 
@@ -208,4 +206,23 @@ exports.restoreSessions = async function () {
   } catch (error) {
     console.error("Error restoring sessions:", error.message);
   }
+};
+
+const getClient = async function (userId) {
+  try {
+    const client = clients.get(userId);
+    if (!client) {
+      throw new Error(`Client not found for userId: ${userId}`);
+    }
+    return client;
+  } catch (error) {
+    console.error(`Error fetching client for userId ${userId}:`, error.message);
+    throw error;
+  }
+};
+
+module.exports = {
+  createClient,
+  restoreSessions,
+  getClient
 };

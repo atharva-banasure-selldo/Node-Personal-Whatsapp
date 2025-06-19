@@ -1,3 +1,4 @@
+const { getClient } = require("../helpers/create-client-helper");
 const Message = require("../models/Message");
 const WhatsAppClient = require("../models/WhatsAppClient");
 
@@ -33,8 +34,13 @@ exports.sendMessage = async (req, res) => {
   }
 
   try {
-    const chatId = number.replace("+", "") + "@c.us";
-    await state.client.sendMessage(chatId, message);
+    const chatId = number.includes("@c.us") 
+      ? number 
+      : `${number.replace(/[^\d]/g, "")}@c.us`;
+
+    console.log("Sending message to chatId:", chatId);
+    const client = await getClient(userId);
+    await client.sendMessage(chatId, message);
 
     const newMessage = new Message({
       userId,
