@@ -4,10 +4,11 @@ const path = require("path");
 const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const { Client, RemoteAuth } = require("whatsapp-web.js");
+const { MongoStore } = require("wwebjs-mongo");
+const mongoose = require("mongoose");
+
 const Message = require("../models/Message");
 const WhatsAppClient = require("../models/WhatsAppClient");
-const { MongoStore } = require('wwebjs-mongo');
-const mongoose = require("mongoose");
 
 const clients = new Map();
 
@@ -23,10 +24,10 @@ const cleanupSession = async (userId) => {
       {
         isAuthenticated: false,
         qr: null,
-        updatedAt: new Date()
+        updatedAt: new Date(),
       }
     );
-    if(clients.has(userId)){
+    if (clients.has(userId)) {
       clients.delete(userId);
     }
   } catch (error) {
@@ -38,10 +39,10 @@ const createClient = async function (userId) {
   return new Promise(async (resolve, reject) => {
     const store = new MongoStore({ mongoose: mongoose });
     const client = new Client({
-      authStrategy: new RemoteAuth({ 
+      authStrategy: new RemoteAuth({
         clientId: userId,
         store: store,
-        backupSyncIntervalMs: 300000 
+        backupSyncIntervalMs: 300000,
       }),
       puppeteer: {
         headless: true,
@@ -49,7 +50,7 @@ const createClient = async function (userId) {
       },
     });
     clients.set(userId, client);
-    
+
     const state = { client, qr: null, isAuthenticated: false };
 
     if (!(await WhatsAppClient.findOne({ userId }))) {
@@ -76,13 +77,7 @@ const createClient = async function (userId) {
     client.on("authenticated", async () => {
       console.log(`Authenticated: ${userId}`);
       try {
-        // await axios.post(
-        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
-        //   {
-        //     userId,
-        //     status: "success",
-        //   }
-        // );
+        await sendNotification(userId, "success", "Authenticated successfully");
       } catch (err) {
         console.log("Error while sending notification", err.message);
       }
@@ -108,13 +103,7 @@ const createClient = async function (userId) {
     client.on("loading_screen", async () => {
       console.log(`Loading screen for ${userId}`);
       try {
-        // await axios.post(
-        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
-        //   {
-        //     userId,
-        //     status: "loading",
-        //   }
-        // );
+        await sendNotification(userId, "loading", "loading");
       } catch (error) {
         console.log("Error during loading screen:", error.message);
       }
@@ -123,14 +112,11 @@ const createClient = async function (userId) {
     client.on("auth_failure", async (message) => {
       console.log(`Authentication failure for ${userId}: ${message}`);
       try {
-        // axios.post(
-        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
-        //   {
-        //     userId,
-        //     status: "failed",
-        //     message: "Failed to authenticate, Please try again",
-        //   }
-        // );
+        await sendNotification(
+          userId,
+          "failed",
+          "Failed to authenticate, Please try again"
+        );
       } catch (error) {
         console.error("Error during auth failure notification:", error.message);
       }
@@ -145,14 +131,7 @@ const createClient = async function (userId) {
     client.on("disconnected", async (reason) => {
       console.log(`Client: ${userId} disconnected`, reason);
       try {
-        // axios.post(
-        //   "http://localhost:8888/client/personal-whatsapps/notify.json",
-        //   {
-        //     userId,
-        //     status: "disconnect",
-        //     message: "Disconnected",
-        //   }
-        // );
+        await sendNotification(userId, "disconnect", reason);
       } catch (error) {
         console.error("Error during auth failure notification:", error.message);
       }
@@ -221,8 +200,23 @@ const getClient = async function (userId) {
   }
 };
 
+const sendNotification = async (userId, status, message) => {
+  try {
+    await axios.post(`${process.env.BASE_URL}/notify`, {
+      userId,
+      status,
+      message,
+    });
+  } catch (error) {
+    console.error(
+      `Error sending notification for userId ${userId}:`,
+      error.message
+    );
+  }
+};
+
 module.exports = {
   createClient,
   restoreSessions,
-  getClient
+  getClient,
 };
