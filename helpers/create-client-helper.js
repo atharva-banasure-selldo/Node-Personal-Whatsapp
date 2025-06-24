@@ -165,7 +165,7 @@ const createClient = async function (userId) {
 
 const restoreSessions = async function () {
   try {
-    const sessions = await WhatsAppClient.find({ isAuthenticated: true });
+    const sessions = await WhatsAppClient.find({});
 
     for (const session of sessions) {
       try {
